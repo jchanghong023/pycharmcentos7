@@ -1,0 +1,84 @@
+name: Build PyCharm CentOS7 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      pycharm_version:
+        description: 'PyCharm version to build (default: latest official)'
+        required: false
+        default: latest
+      jbr_release:
+        description: 'JBR release tag from jchanghong023/JetBrainsRuntime (default: latest on the release page)'
+        required: false
+        default: latest
+      create_release:
+        description: 'Create a GitHub Release (true/false)'
+        required: false
+        default: 'true'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pycharm-centos7-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build PyCharm CentOS7 package
+        env:
+          PYCHARM_VERSION: ${{ inputs.pycharm_version || 'latest' }}
+          JBR_RELEASE: ${{ inputs.jbr_release || 'latest' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/build_pycharm_centos7.sh \
+            --version "$PYCHARM_VERSION" \
+            --jbr-release "$JBR_RELEASE"
+
+      - name: Compute release metadata
+        id: meta
+        run: |
+          tgz="$(basename "$(ls dist/pycharm-*-centos7.tar.gz | head -1)")"
+          version="$(printf '%s' "$tgz" | sed -E 's/^pycharm-(.+)-centos7\.tar\.gz$/\1/')"
+          echo "tgz=$tgz" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=pycharm-$version-centos7" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: PyCharm ${{ steps.meta.outputs.version }} (CentOS 7)
+          body: |
+            PyCharm **${{ steps.meta.outputs.version }}** repackaged for **CentOS 7 / glibc 2.17**.
+
+            - PyCharm: official `${{ steps.meta.outputs.version }}` Linux x64
+            - JBR: latest CentOS 7 compatible JetBrains Runtime from the
+              [JetBrainsRuntime](https://github.com/jchanghong023/JetBrainsRuntime/releases) release page
+              (GLIBC <= 2.17, GLIBCXX <= 3.4.19, CXXABI <= 1.3.7)
+            - Verified: `java -version` and `pycharm --version` on the packaged build,
+              including inside a `centos:7` container in CI
+
+            Usage:
+            ```
+            tar xzf ${{ steps.meta.outputs.tgz }}
+            cd pycharm-${{ steps.meta.outputs.version }}
+            bin/pycharm.sh
+            ```
+          files: |
+            dist/pycharm-*-centos7.tar.gz
+            dist/SHA256SUMS
