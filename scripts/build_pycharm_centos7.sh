@@ -15,10 +15,24 @@
 #   (custom JBR 25 build for CentOS 7 / glibc 2.17, validated:
 #    GLIBC <= 2.17, GLIBCXX <= 3.4.19, CXXABI <= 1.3.7)
 #
+# Additional changes applied to the packaged IDE (baked into the tarball):
+#   * bin/pycharm64.vmoptions  - tuned for a 32 GB RAM workstation:
+#       -Xms2g/-Xmx8g heap, G1 with 100 ms pause target (smooth UI), 1 GB code
+#       cache; keeps all stock JetBrains defaults otherwise
+#   * bin/idea.properties      - enables "true smooth scrolling"
+#       (idea.true.smooth.scrolling=true: blit-accelerated scrolling, true
+#       double buffering, high-precision wheel + input interpolation)
+#   * bin/pycharm              - the upstream NATIVE launcher requires
+#       GLIBC >= 2.25 and cannot start on CentOS 7 / glibc 2.17; it is
+#       replaced by a glibc-2.17 compatible shell wrapper that forwards to
+#       bin/pycharm.sh (which uses the bundled CentOS 7 compatible JBR).
+#       bin/pycharm.sh and the remote-dev-server launcher are unchanged.
+#
 # Verification performed after packaging:
 #   * jbr/bin/java -version                 (JBR runs on this host)
+#   * bin/pycharm --version                 (shell launcher + JBR work)
 #   * bin/pycharm.sh --version              (IDE launcher + JBR work)
-#   * fresh-extract of the produced tarball, then the two checks above
+#   * fresh-extract of the produced tarball, then the checks above
 #   * if docker is available: the same checks inside a centos:7 container
 #
 # Usage:
@@ -130,19 +144,93 @@ download() {
 
 # ---------------------------------------------------------------------------
 # verify an extracted PyCharm dir with java -version + pycharm --version
+# (both the shell wrapper launcher bin/pycharm and bin/pycharm.sh)
 # ---------------------------------------------------------------------------
 verify_pycharm_dir() {
   local dir="$1" label="$2" out rc
   log "verifying $label"
   log "  jbr/bin/java -version"
   "$dir/jbr/bin/java" -version 2>&1 || die "$label: jbr/bin/java -version failed"
-  log "  bin/pycharm.sh --version"
-  out="$(cd "$dir" && ./bin/pycharm.sh --version 2>&1)"
-  rc=$?
-  printf '%s\n' "$out" | sed 's/^/    /'
-  [ $rc -eq 0 ] || die "$label: pycharm --version failed (rc=$rc)"
-  printf '%s' "$out" | grep -qi 'pycharm' \
-    || die "$label: pycharm --version returned unexpected output"
+  for launcher in bin/pycharm bin/pycharm.sh; do
+    log "  $launcher --version"
+    out="$(cd "$dir" && "./$launcher" --version 2>&1)"
+    rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    [ $rc -eq 0 ] || die "$label: $launcher --version failed (rc=$rc)"
+    printf '%s' "$out" | grep -qi 'pycharm' \
+      || die "$label: $launcher --version returned unexpected output"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# apply_centos7_tweaks <pycharm_dir>
+#   Tune the IDE for a 32 GB RAM workstation + smooth editor scrolling, and
+#   make the native launcher (bin/pycharm, which requires GLIBC >= 2.25) work
+#   on CentOS 7 / glibc 2.17 by replacing it with a shell wrapper that
+#   forwards to bin/pycharm.sh (the bundled JBR is already glibc-2.17
+#   compatible). Everything here is baked into the produced tarball.
+# ---------------------------------------------------------------------------
+apply_centos7_tweaks() {
+  local dir="$1" f
+  log "applying CentOS 7 / 32 GB RAM optimizations to $dir"
+
+  # -- 1. tuned JVM options (heap for a 32 GB machine, G1 low-pause target) --
+  f="$dir/bin/pycharm64.vmoptions"
+  cat > "$f" <<'EOF'
+-Xms2g
+-Xmx8g
+-XX:ReservedCodeCacheSize=1024m
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=100
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:-OmitStackTraceInFastThrow
+-XX:CICompilerCount=2
+-XX:+IgnoreUnrecognizedVMOptions
+-XX:+UnlockDiagnosticVMOptions
+-XX:TieredOldPercentage=100000
+-XX:+UseCompactObjectHeaders
+--sun-misc-unsafe-memory-access=allow
+-ea
+-Dsun.io.useCanonCaches=false
+-Dsun.java2d.metal=true
+-Djbr.catch.SIGABRT=true
+-Djdk.http.auth.tunneling.disabledSchemes=""
+-Djdk.attach.allowAttachSelf=true
+-Djdk.module.illegalAccess.silent=true
+-Djdk.nio.maxCachedBufferSize=2097152
+-Djava.util.zip.use.nio.for.zip.file.access=true
+-Dkotlinx.coroutines.debug=off
+-Dskiko.rendering.useScreenMenuBar=false
+-Djava.nio.file.spi.DefaultFileSystemProvider=com.intellij.platform.core.nio.fs.MultiRoutingFileSystemProvider
+-Dwelcome.screen.defaultWidth=1000
+-Dwelcome.screen.defaultHeight=720
+-Dintellij.startup.wizard.initial.timeout=1
+-Dsun.tools.attach.tmp.only=true
+-Dawt.lock.fair=true
+-Dawt.toolkit.name=auto
+EOF
+
+  # -- 2. enable true smooth scrolling (blit-acceleration, double buffering,
+  #      high-precision wheel + input interpolation) --------------------------
+  f="$dir/bin/idea.properties"
+  if grep -q '^#idea.true.smooth.scrolling=true' "$f"; then
+    sed -i 's/^#idea\.true\.smooth\.scrolling=true/idea.true.smooth.scrolling=true/' "$f"
+    log "  enabled idea.true.smooth.scrolling in bin/idea.properties"
+  fi
+
+  # -- 3. replace native launcher (requires GLIBC >= 2.25) with a shell
+  #        wrapper that forwards to pycharm.sh (glibc-2.17 compatible) --------
+  f="$dir/bin/pycharm"
+  cat > "$f" <<'EOF'
+#!/bin/sh
+# CentOS 7 (glibc 2.17) compatible PyCharm launcher.
+# The upstream native launcher requires GLIBC >= 2.25 and cannot start on
+# CentOS 7. Forward to pycharm.sh, which uses the bundled CentOS 7 compatible
+# JBR and is fully glibc-2.17 compatible.
+exec "$(dirname "$(readlink -f "$0")")/pycharm.sh" "$@"
+EOF
+  chmod 0755 "$f"
+  log "  replaced bin/pycharm native launcher with glibc-2.17 compatible wrapper"
 }
 
 # ---------------------------------------------------------------------------
@@ -211,6 +299,9 @@ main() {
   mv "$JBR_ROOT" "$PYCHARM_DIR/jbr"
   log "JBR installed into $PYCHARM_DIR/jbr"
 
+  # ---- apply CentOS 7 / performance tweaks (baked into the tarball) ----
+  apply_centos7_tweaks "$PYCHARM_DIR"
+
   # ---- repackage ----
   OUT_TGZ="$OUT/pycharm-${PYCHARM_VERSION}-centos7.tar.gz"
   log "repackaging -> $OUT_TGZ"
@@ -243,6 +334,7 @@ main() {
         mkdir -p /tmp/v
         tar xzf /dist/$(basename "$OUT_TGZ") -C /tmp/v
         /tmp/v/$PYCHARM_NAME/jbr/bin/java -version
+        cd /tmp/v/$PYCHARM_NAME && ./bin/pycharm --version
         cd /tmp/v/$PYCHARM_NAME && ./bin/pycharm.sh --version
       " || die "validation inside centos:7 container failed"
   else
