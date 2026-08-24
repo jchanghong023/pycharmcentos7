@@ -1,39 +1,20 @@
 #!/usr/bin/env bash
 #
-# build_pycharm_centos7.sh
+# Build a PyCharm Linux x64 package that runs directly on CentOS 7.
 #
-# Download the official PyCharm (Linux x64), replace the bundled JetBrains
-# Runtime (jbr) with the latest CentOS 7 / glibc 2.17 compatible JBR release
-# published on the JetBrainsRuntime repo release page, and repackage into a
-# CentOS 7 compatible PyCharm tarball.
+# The package contains:
+#   * official PyCharm Linux x64 files
+#   * the CentOS 7 / glibc 2.17 compatible JBR from jchanghong023/JetBrainsRuntime
+#   * a private GCC 13.2 C++ runtime (libstdc++.so.6 + libgcc_s.so.1)
 #
-# The JBR is ALWAYS downloaded fresh from the repo release page (never reused
-# from local files), so this script works identically on this machine and in
-# the GitHub Actions pipeline (fresh environment).
+# Why the private C++ runtime is required:
+# PyCharm 2026.2's Skiko/Compose native library requires newer GLIBCXX/CXXABI
+# symbols than CentOS 7's GCC 4.8 libstdc++. Some corporate environments also
+# inject GCC 4.8 into LD_LIBRARY_PATH. The packaged pycharm.sh prepends only
+# this IDE's private runtime, so no global shell/module configuration is needed.
 #
-#   https://github.com/jchanghong023/JetBrainsRuntime/releases
-#   (custom JBR 25 build for CentOS 7 / glibc 2.17, validated:
-#    GLIBC <= 2.17, GLIBCXX <= 3.4.19, CXXABI <= 1.3.7)
-#
-# Additional changes applied to the packaged IDE (baked into the tarball):
-#   * bin/pycharm64.vmoptions  - tuned for a 32 GB RAM workstation:
-#       -Xms2g/-Xmx8g heap, G1 with 100 ms pause target (smooth UI), 1 GB code
-#       cache; keeps all stock JetBrains defaults otherwise
-#   * bin/idea.properties      - enables "true smooth scrolling"
-#       (idea.true.smooth.scrolling=true: blit-accelerated scrolling, true
-#       double buffering, high-precision wheel + input interpolation)
-#   * bin/pycharm              - the upstream NATIVE launcher requires
-#       GLIBC >= 2.25 and cannot start on CentOS 7 / glibc 2.17; it is
-#       replaced by a glibc-2.17 compatible shell wrapper that forwards to
-#       bin/pycharm.sh (which uses the bundled CentOS 7 compatible JBR).
-#       bin/pycharm.sh and the remote-dev-server launcher are unchanged.
-#
-# Verification performed after packaging:
-#   * jbr/bin/java -version                 (JBR runs on this host)
-#   * bin/pycharm --version                 (shell launcher + JBR work)
-#   * bin/pycharm.sh --version              (IDE launcher + JBR work)
-#   * fresh-extract of the produced tarball, then the checks above
-#   * if docker is available: the same checks inside a centos:7 container
+# We intentionally do NOT bundle a newer glibc. CentOS 7's glibc 2.17 remains
+# the system ABI. The bundled GCC runtime is selected to run on that ABI.
 #
 # Usage:
 #   ./scripts/build_pycharm_centos7.sh [options]
@@ -41,17 +22,22 @@
 # Options:
 #   --version <ver|latest>  PyCharm version to package (default: latest)
 #   --jbr-release <tag|latest>
-#                           JBR release tag from the release page
-#                           (default: latest = newest release on the page)
-#   --jbr-repo <owner/repo> repo hosting the JBR releases
+#                           JBR release tag from jchanghong023/JetBrainsRuntime
+#                           (default: latest)
+#   --jbr-repo <owner/repo> repository hosting JBR releases
 #                           (default: jchanghong023/JetBrainsRuntime)
-#   --jbr-asset <glob>      JBR asset name glob (default: jbr_lb-*-linux-x64-*.tar.gz)
+#   --jbr-asset <glob>      JBR asset glob
+#                           (default: jbr_lb-*-linux-x64-*.tar.gz)
 #   --keep                  keep the work directory
 #
-# Env overrides (same names): PYCHARM_VERSION, JBR_RELEASE, JBR_REPO,
-#                             JBR_ASSET_PATTERN, OUT_DIR, WORK_DIR, GITHUB_TOKEN
+# Environment overrides:
+#   PYCHARM_VERSION, JBR_RELEASE, JBR_REPO, JBR_ASSET_PATTERN,
+#   CXX_RUNTIME_BASE_URL, LIBSTDCXX_PACKAGE, LIBSTDCXX_SHA256,
+#   LIBGCC_PACKAGE, LIBGCC_SHA256, OUT_DIR, WORK_DIR, GITHUB_TOKEN
 #
-# Output: <OUT_DIR>/pycharm-<version>-centos7.tar.gz + SHA256SUMS
+# Output:
+#   <OUT_DIR>/pycharm-<version>-centos7.tar.gz
+#   <OUT_DIR>/SHA256SUMS
 #
 
 set -euo pipefail
@@ -60,6 +46,16 @@ PYCHARM_VERSION="${PYCHARM_VERSION:-latest}"
 JBR_RELEASE="${JBR_RELEASE:-latest}"
 JBR_REPO="${JBR_REPO:-jchanghong023/JetBrainsRuntime}"
 JBR_ASSET_PATTERN="${JBR_ASSET_PATTERN:-jbr_lb-*-linux-x64-*.tar.gz}"
+
+# GCC 13.2 matches the runtime that was already verified on the target machine.
+# These conda-forge linux-64 packages provide the runtime libraries without
+# replacing the CentOS 7 system glibc.
+CXX_RUNTIME_BASE_URL="${CXX_RUNTIME_BASE_URL:-https://conda.anaconda.org/conda-forge/linux-64}"
+LIBSTDCXX_PACKAGE="${LIBSTDCXX_PACKAGE:-libstdcxx-ng-13.2.0-hc0a3c3a_7.conda}"
+LIBSTDCXX_SHA256="${LIBSTDCXX_SHA256:-35f1e08be0a84810c9075f5bd008495ac94e6c5fe306dfe4b34546f11fed850f}"
+LIBGCC_PACKAGE="${LIBGCC_PACKAGE:-libgcc-ng-13.2.0-h77fa898_7.conda}"
+LIBGCC_SHA256="${LIBGCC_SHA256:-62af2b89acbe74a21606c8410c276e57309c0a2ab8a9e8639e3c8131c0b60c92}"
+
 OUT_DIR="${OUT_DIR:-dist}"
 WORK_DIR="${WORK_DIR:-/tmp/pycharm-centos7-build}"
 KEEP_WORK=0
@@ -82,10 +78,37 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
 need curl
 need tar
 need sha256sum
+need unzip
+need zstd
+need strings
+need ldd
 
 # ---------------------------------------------------------------------------
-# resolve the latest PyCharm version + linux download links from the official
-# JetBrains releases API (parsed with grep/sed, no python needed)
+# Version helpers
+# ---------------------------------------------------------------------------
+version_ge() {
+  local actual="$1" minimum="$2"
+  [ "$(printf '%s\n%s\n' "$actual" "$minimum" | sort -V | tail -1)" = "$actual" ]
+}
+
+version_le() {
+  local actual="$1" maximum="$2"
+  [ "$(printf '%s\n%s\n' "$actual" "$maximum" | sort -V | tail -1)" = "$maximum" ]
+}
+
+max_symbol_version() {
+  local file="$1" prefix="$2"
+  {
+    strings "$file" 2>/dev/null \
+      | grep -oE "${prefix}_[0-9]+(\.[0-9]+)*" \
+      | sed "s/^${prefix}_//" \
+      | sort -V \
+      | tail -1
+  } || true
+}
+
+# ---------------------------------------------------------------------------
+# Resolve latest PyCharm from the official JetBrains release service.
 # ---------------------------------------------------------------------------
 fetch_latest_pycharm() {
   local api="https://data.services.jetbrains.com/products/releases?code=PCP&latest=true&type=release"
@@ -101,8 +124,7 @@ fetch_latest_pycharm() {
 }
 
 # ---------------------------------------------------------------------------
-# resolve the newest JBR release tag from the repo release page (GitHub API),
-# including pre-releases. Uses GITHUB_TOKEN when available.
+# Resolve newest JBR release, including pre-releases.
 # ---------------------------------------------------------------------------
 resolve_latest_jbr_release() {
   local api="https://api.github.com/repos/${JBR_REPO}/releases?per_page=1"
@@ -117,20 +139,12 @@ resolve_latest_jbr_release() {
   printf '%s\n' "$tag"
 }
 
-# highest GLIBC_* symbol version required by a binary
-max_glibc() {
-  local f="$1"
-  if command -v objdump >/dev/null 2>&1; then
-    objdump -T "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sed 's/^GLIBC_//' | sort -V | tail -1
-  else
-    readelf -V "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sed 's/^GLIBC_//' | sort -V | tail -1
-  fi
-}
-
-# robust download: resume partial files, abort on stalled transfer, retry
+# ---------------------------------------------------------------------------
+# Robust download with retries and resume.
+# ---------------------------------------------------------------------------
 download() {
   local url="$1" out="$2" attempt=0
-  while [ $attempt -lt 6 ]; do
+  while [ "$attempt" -lt 6 ]; do
     attempt=$((attempt + 1))
     if curl -fsSL --retry 3 --connect-timeout 20 \
          --speed-time 60 --speed-limit 2048 -C - "$url" -o "$out"; then
@@ -142,39 +156,231 @@ download() {
   die "failed to download $url"
 }
 
+verify_sha256() {
+  local file="$1" expected="$2"
+  (
+    cd "$(dirname "$file")"
+    printf '%s  %s\n' "$expected" "$(basename "$file")" | sha256sum -c -
+  ) || die "sha256 verification failed: $(basename "$file")"
+}
+
 # ---------------------------------------------------------------------------
-# verify an extracted PyCharm dir with java -version + pycharm --version
-# (both the shell wrapper launcher bin/pycharm and bin/pycharm.sh)
+# Extract the payload from a .conda package.
+# ---------------------------------------------------------------------------
+extract_conda_payload() {
+  local package="$1" destination="$2" scratch="$3" payload
+  rm -rf "$scratch" "$destination"
+  mkdir -p "$scratch" "$destination"
+  unzip -q "$package" -d "$scratch"
+  payload="$(find "$scratch" -maxdepth 1 -type f -name 'pkg-*.tar.zst' -print -quit)"
+  [ -n "$payload" ] || die "no pkg-*.tar.zst payload in $(basename "$package")"
+  zstd -dc "$payload" | tar -xf - -C "$destination"
+}
+
+# ---------------------------------------------------------------------------
+# Install the private GCC runtime into <pycharm>/lib/centos7-runtime.
+# ---------------------------------------------------------------------------
+install_private_cxx_runtime() {
+  local dir="$1"
+  local std_pkg="$WORK/$LIBSTDCXX_PACKAGE"
+  local gcc_pkg="$WORK/$LIBGCC_PACKAGE"
+  local std_root="$WORK/libstdcxx-root"
+  local gcc_root="$WORK/libgcc-root"
+  local runtime="$dir/lib/centos7-runtime"
+  local std_src gcc_src std_glibc_req gcc_glibc_req glibcxx_max cxxabi_max
+
+  log "downloading private GCC 13.2 runtime for CentOS 7"
+  download "$CXX_RUNTIME_BASE_URL/$LIBSTDCXX_PACKAGE" "$std_pkg"
+  download "$CXX_RUNTIME_BASE_URL/$LIBGCC_PACKAGE" "$gcc_pkg"
+  verify_sha256 "$std_pkg" "$LIBSTDCXX_SHA256"
+  verify_sha256 "$gcc_pkg" "$LIBGCC_SHA256"
+
+  extract_conda_payload "$std_pkg" "$std_root" "$WORK/libstdcxx-conda"
+  extract_conda_payload "$gcc_pkg" "$gcc_root" "$WORK/libgcc-conda"
+
+  std_src="$std_root/lib/libstdc++.so.6"
+  gcc_src="$gcc_root/lib/libgcc_s.so.1"
+  [ -e "$std_src" ] || die "$LIBSTDCXX_PACKAGE does not contain lib/libstdc++.so.6"
+  [ -e "$gcc_src" ] || die "$LIBGCC_PACKAGE does not contain lib/libgcc_s.so.1"
+
+  mkdir -p "$runtime"
+  cp -L "$std_src" "$runtime/libstdc++.so.6"
+  cp -L "$gcc_src" "$runtime/libgcc_s.so.1"
+  chmod 0755 "$runtime/libstdc++.so.6" "$runtime/libgcc_s.so.1"
+
+  std_glibc_req="$(max_symbol_version "$runtime/libstdc++.so.6" GLIBC)"
+  glibcxx_max="$(max_symbol_version "$runtime/libstdc++.so.6" GLIBCXX)"
+  cxxabi_max="$(max_symbol_version "$runtime/libstdc++.so.6" CXXABI)"
+
+  [ -n "$std_glibc_req" ] || die "could not read GLIBC requirements from bundled libstdc++.so.6"
+  [ -n "$glibcxx_max" ] || die "could not read GLIBCXX versions from bundled libstdc++.so.6"
+  [ -n "$cxxabi_max" ] || die "could not read CXXABI versions from bundled libstdc++.so.6"
+
+  version_le "$std_glibc_req" "2.17" \
+    || die "bundled libstdc++.so.6 requires GLIBC_$std_glibc_req (CentOS 7 limit: GLIBC_2.17)"
+  version_ge "$glibcxx_max" "3.4.22" \
+    || die "bundled libstdc++.so.6 only provides GLIBCXX_$glibcxx_max (need >= GLIBCXX_3.4.22)"
+  version_ge "$cxxabi_max" "1.3.9" \
+    || die "bundled libstdc++.so.6 only provides CXXABI_$cxxabi_max (need >= CXXABI_1.3.9)"
+
+  gcc_glibc_req="$(max_symbol_version "$runtime/libgcc_s.so.1" GLIBC)"
+  [ -n "$gcc_glibc_req" ] || die "could not read GLIBC requirements from bundled libgcc_s.so.1"
+  version_le "$gcc_glibc_req" "2.17" \
+    || die "bundled libgcc_s.so.1 requires GLIBC_$gcc_glibc_req (CentOS 7 limit: GLIBC_2.17)"
+
+  cat > "$runtime/README.txt" <<EOF
+PyCharm CentOS 7 private C++ runtime
+====================================
+
+This directory is prepended to LD_LIBRARY_PATH by bin/pycharm.sh only.
+It is not a replacement for the CentOS 7 system glibc.
+
+Source:
+  $CXX_RUNTIME_BASE_URL/$LIBSTDCXX_PACKAGE
+  SHA256: $LIBSTDCXX_SHA256
+  $CXX_RUNTIME_BASE_URL/$LIBGCC_PACKAGE
+  SHA256: $LIBGCC_SHA256
+
+Reason:
+  PyCharm/Skiko requires at least GLIBCXX_3.4.22 and CXXABI_1.3.9,
+  while CentOS 7's GCC 4.8 libstdc++ is too old.
+EOF
+
+  log "  private runtime installed: $runtime"
+  log "  libstdc++ requires GLIBC_$std_glibc_req; provides GLIBCXX_$glibcxx_max / CXXABI_$cxxabi_max"
+}
+
+# ---------------------------------------------------------------------------
+# Patch pycharm.sh so the package wins over an old user/system libstdc++.
+# The change is scoped to the PyCharm process tree; it does not modify the
+# caller's shell environment or ~/.cshrc.
+# ---------------------------------------------------------------------------
+patch_pycharm_sh() {
+  local f="$1/bin/pycharm.sh" tmp first_line
+  [ -f "$f" ] || die "missing $f"
+
+  if grep -q 'pycharmcentos7 private C++ runtime' "$f"; then
+    return 0
+  fi
+
+  IFS= read -r first_line < "$f" || die "cannot read $f"
+  case "$first_line" in
+    '#!'*) ;;
+    *) die "$f has no shebang" ;;
+  esac
+
+  tmp="${f}.centos7.$$"
+  {
+    printf '%s\n' "$first_line"
+    cat <<'EOF'
+
+# >>> pycharmcentos7 private C++ runtime >>>
+# Keep the bundled GCC runtime ahead of CentOS 7 / site-provided GCC 4.8.
+# This fixes Skiko/Compose GLIBCXX/CXXABI resolution without changing the
+# machine-wide environment.
+_PYCHARM_BIN_HOME=$(dirname "$(realpath "$0")")
+_PYCHARM_CXX_RUNTIME="${_PYCHARM_BIN_HOME}/../lib/centos7-runtime"
+if [ -d "$_PYCHARM_CXX_RUNTIME" ]; then
+  case ":${LD_LIBRARY_PATH:-}:" in
+    *":${_PYCHARM_CXX_RUNTIME}:"*) ;;
+    *)
+      if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+        LD_LIBRARY_PATH="${_PYCHARM_CXX_RUNTIME}:${LD_LIBRARY_PATH}"
+      else
+        LD_LIBRARY_PATH="${_PYCHARM_CXX_RUNTIME}"
+      fi
+      export LD_LIBRARY_PATH
+      ;;
+  esac
+fi
+unset _PYCHARM_BIN_HOME _PYCHARM_CXX_RUNTIME
+# <<< pycharmcentos7 private C++ runtime <<<
+
+EOF
+    tail -n +2 "$f"
+  } > "$tmp"
+  chmod 0755 "$tmp"
+  mv "$tmp" "$f"
+  log "  patched bin/pycharm.sh to use the private GCC runtime first"
+}
+
+# ---------------------------------------------------------------------------
+# Verify launchers and the Skiko C++ ABI resolution.
 # ---------------------------------------------------------------------------
 verify_pycharm_dir() {
-  local dir="$1" label="$2" out rc
+  local dir="$1" label="$2" launcher out rc
   log "verifying $label"
+
+  [ -x "$dir/jbr/bin/java" ] || die "$label: missing jbr/bin/java"
+  [ -f "$dir/lib/centos7-runtime/libstdc++.so.6" ] \
+    || die "$label: missing private libstdc++.so.6"
+  [ -f "$dir/lib/centos7-runtime/libgcc_s.so.1" ] \
+    || die "$label: missing private libgcc_s.so.1"
+  grep -q 'pycharmcentos7 private C++ runtime' "$dir/bin/pycharm.sh" \
+    || die "$label: pycharm.sh runtime patch is missing"
+
   log "  jbr/bin/java -version"
   "$dir/jbr/bin/java" -version 2>&1 || die "$label: jbr/bin/java -version failed"
+
   for launcher in bin/pycharm bin/pycharm.sh; do
     log "  $launcher --version"
-    out="$(cd "$dir" && "./$launcher" --version 2>&1)"
-    rc=$?
+    if out="$(cd "$dir" && "./$launcher" --version 2>&1)"; then
+      rc=0
+    else
+      rc=$?
+    fi
     printf '%s\n' "$out" | sed 's/^/    /'
-    [ $rc -eq 0 ] || die "$label: $launcher --version failed (rc=$rc)"
+    [ "$rc" -eq 0 ] || die "$label: $launcher --version failed (rc=$rc)"
     printf '%s' "$out" | grep -qi 'pycharm' \
       || die "$label: $launcher --version returned unexpected output"
   done
 }
 
+verify_skiko_runtime() {
+  local dir="$1" label="$2" skiko runtime out req_glibcxx req_cxxabi have_glibcxx have_cxxabi
+  skiko="$(find "$dir" -type f -name 'libskiko-linux-x64.so' -print -quit)"
+  if [ -z "$skiko" ]; then
+    log "$label: libskiko-linux-x64.so not present; skipping Skiko-specific ABI check"
+    return 0
+  fi
+
+  runtime="$dir/lib/centos7-runtime"
+  req_glibcxx="$(max_symbol_version "$skiko" GLIBCXX)"
+  req_cxxabi="$(max_symbol_version "$skiko" CXXABI)"
+  have_glibcxx="$(max_symbol_version "$runtime/libstdc++.so.6" GLIBCXX)"
+  have_cxxabi="$(max_symbol_version "$runtime/libstdc++.so.6" CXXABI)"
+
+  log "$label: Skiko requires GLIBCXX_${req_glibcxx:-unknown} / CXXABI_${req_cxxabi:-unknown}"
+  if [ -n "$req_glibcxx" ]; then
+    version_ge "$have_glibcxx" "$req_glibcxx" \
+      || die "$label: private libstdc++ does not satisfy Skiko GLIBCXX_$req_glibcxx"
+  fi
+  if [ -n "$req_cxxabi" ]; then
+    version_ge "$have_cxxabi" "$req_cxxabi" \
+      || die "$label: private libstdc++ does not satisfy Skiko CXXABI_$req_cxxabi"
+  fi
+
+  out="$(
+    LD_LIBRARY_PATH="$runtime${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      ldd "$skiko" 2>&1 || true
+  )"
+  printf '%s\n' "$out" | sed 's/^/    /'
+
+  printf '%s\n' "$out" | grep -F "$runtime/libstdc++.so.6" >/dev/null \
+    || die "$label: ldd did not select the packaged libstdc++.so.6 for Skiko"
+  if printf '%s\n' "$out" | grep -Eq '(GLIBCXX_|CXXABI_)[0-9.]+.*not found'; then
+    die "$label: Skiko still has unresolved GLIBCXX/CXXABI symbols"
+  fi
+}
+
 # ---------------------------------------------------------------------------
-# apply_centos7_tweaks <pycharm_dir>
-#   Tune the IDE for a 32 GB RAM workstation + smooth editor scrolling, and
-#   make the native launcher (bin/pycharm, which requires GLIBC >= 2.25) work
-#   on CentOS 7 / glibc 2.17 by replacing it with a shell wrapper that
-#   forwards to bin/pycharm.sh (the bundled JBR is already glibc-2.17
-#   compatible). Everything here is baked into the produced tarball.
+# Apply all CentOS 7 package changes.
 # ---------------------------------------------------------------------------
 apply_centos7_tweaks() {
   local dir="$1" f
-  log "applying CentOS 7 / 32 GB RAM optimizations to $dir"
+  log "applying CentOS 7 package changes to $dir"
 
-  # -- 1. tuned JVM options (heap for a 32 GB machine, G1 low-pause target) --
+  # Keep the existing workstation tuning from this project.
   f="$dir/bin/pycharm64.vmoptions"
   cat > "$f" <<'EOF'
 -Xms2g
@@ -210,29 +416,29 @@ apply_centos7_tweaks() {
 -Dawt.toolkit.name=auto
 EOF
 
-  # -- 2. enable true smooth scrolling (blit-acceleration, double buffering,
-  #      high-precision wheel + input interpolation) --------------------------
   f="$dir/bin/idea.properties"
   if grep -q '^#idea.true.smooth.scrolling=true' "$f"; then
     sed -i 's/^#idea\.true\.smooth\.scrolling=true/idea.true.smooth.scrolling=true/' "$f"
     log "  enabled idea.true.smooth.scrolling in bin/idea.properties"
   fi
 
-  # -- 3. replace native launcher (requires GLIBC >= 2.25) with a shell
-  #        wrapper that forwards to pycharm.sh (glibc-2.17 compatible) --------
+  install_private_cxx_runtime "$dir"
+  patch_pycharm_sh "$dir"
+
+  # The upstream native launcher itself requires a newer glibc. Use the shell
+  # launcher, which now also installs the private C++ runtime.
   f="$dir/bin/pycharm"
   cat > "$f" <<'EOF'
 #!/bin/sh
-# CentOS 7 (glibc 2.17) compatible PyCharm launcher.
-# The upstream native launcher requires GLIBC >= 2.25 and cannot start on
-# CentOS 7. Forward to pycharm.sh, which uses the bundled CentOS 7 compatible
-# JBR and is fully glibc-2.17 compatible.
-exec "$(dirname "$(readlink -f "$0")")/pycharm.sh" "$@"
+# CentOS 7 (glibc 2.17) compatible launcher.
+exec "$(dirname "$(realpath "$0")")/pycharm.sh" "$@"
 EOF
   chmod 0755 "$f"
-  log "  replaced bin/pycharm native launcher with glibc-2.17 compatible wrapper"
+  log "  replaced bin/pycharm native launcher with the CentOS 7 shell launcher"
 }
 
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 main() {
   rm -rf "$WORK_DIR"
@@ -250,57 +456,65 @@ main() {
   fi
   PYCHARM_TGZ="$(basename "$PYCHARM_URL")"
 
-  # ---- download + verify PyCharm (always fresh) ----
+  # ---- download + verify PyCharm ----
   log "downloading PyCharm: $PYCHARM_URL"
   download "$PYCHARM_URL" "$WORK/$PYCHARM_TGZ"
   curl -fsSL "$PYCHARM_SHA_URL" -o "$WORK/$PYCHARM_TGZ.sha256"
   ( cd "$WORK" && sha256sum -c "$PYCHARM_TGZ.sha256" ) \
     || die "PyCharm sha256 verification failed"
 
-  # ---- resolve + download + verify JBR (always from the release page) ----
+  # ---- resolve + download + verify JBR ----
   if [ "$JBR_RELEASE" = "latest" ]; then
     JBR_RELEASE="$(resolve_latest_jbr_release)" \
-      || die "could not resolve latest JBR release from $JBR_REPO (GitHub API failed); set --jbr-release explicitly"
+      || die "could not resolve latest JBR release from $JBR_REPO; set --jbr-release explicitly"
     log "latest JBR release resolved: $JBR_RELEASE"
   fi
+
   JBR_BASE="https://github.com/${JBR_REPO}/releases/download/${JBR_RELEASE}"
   log "resolving JBR asset from $JBR_RELEASE"
   curl -fsSL "$JBR_BASE/SHA256SUMS" -o "$WORK/SHA256SUMS.jbr" \
     || die "failed to fetch JBR SHA256SUMS (release $JBR_RELEASE)"
+
   JBR_FILE=""
   JBR_HASH=""
   while read -r _h _f; do
     _f="${_f#./}"
     if [[ "$_f" == $JBR_ASSET_PATTERN ]]; then
-      JBR_FILE="$_f"; JBR_HASH="$_h"; break
+      JBR_FILE="$_f"
+      JBR_HASH="$_h"
+      break
     fi
   done < "$WORK/SHA256SUMS.jbr"
-  [ -n "$JBR_FILE" ] || die "no JBR asset matched pattern '$JBR_ASSET_PATTERN' in release $JBR_RELEASE"
+
+  [ -n "$JBR_FILE" ] || die "no JBR asset matched '$JBR_ASSET_PATTERN' in release $JBR_RELEASE"
   log "JBR asset: $JBR_FILE"
   download "$JBR_BASE/$JBR_FILE" "$WORK/$JBR_FILE"
-  ( cd "$WORK" && printf '%s  %s\n' "$JBR_HASH" "$JBR_FILE" | sha256sum -c - ) \
-    || die "JBR sha256 verification failed"
+  verify_sha256 "$WORK/$JBR_FILE" "$JBR_HASH"
 
   # ---- extract PyCharm ----
   log "extracting PyCharm"
   tar -xzf "$WORK/$PYCHARM_TGZ" -C "$WORK"
-  PYCHARM_DIR="$(find "$WORK" -mindepth 1 -maxdepth 1 -type d -name 'pycharm-*' | head -1)"
+  PYCHARM_DIR="$(find "$WORK" -mindepth 1 -maxdepth 1 -type d -name 'pycharm-*' -print -quit)"
   [ -n "$PYCHARM_DIR" ] || die "could not find PyCharm extract directory"
   PYCHARM_NAME="$(basename "$PYCHARM_DIR")"
   [ -d "$PYCHARM_DIR/jbr" ] || die "PyCharm has no jbr/ directory to replace"
 
-  # ---- swap the JBR ----
+  # ---- swap JBR ----
   rm -rf "$PYCHARM_DIR/jbr"
   mkdir -p "$WORK/jbr-extract"
   log "extracting JBR"
   tar -xzf "$WORK/$JBR_FILE" -C "$WORK/jbr-extract"
-  JBR_ROOT="$(find "$WORK/jbr-extract" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  JBR_ROOT="$(find "$WORK/jbr-extract" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   [ -n "$JBR_ROOT" ] || die "JBR tarball has no top-level directory"
   mv "$JBR_ROOT" "$PYCHARM_DIR/jbr"
   log "JBR installed into $PYCHARM_DIR/jbr"
 
-  # ---- apply CentOS 7 / performance tweaks (baked into the tarball) ----
+  # ---- apply package changes ----
   apply_centos7_tweaks "$PYCHARM_DIR"
+
+  # ---- verify the assembled tree before packaging ----
+  verify_pycharm_dir "$PYCHARM_DIR" "assembled tree ($(uname -sr))"
+  verify_skiko_runtime "$PYCHARM_DIR" "assembled tree"
 
   # ---- repackage ----
   OUT_TGZ="$OUT/pycharm-${PYCHARM_VERSION}-centos7.tar.gz"
@@ -308,37 +522,46 @@ main() {
   tar -czf "$OUT_TGZ" -C "$WORK" "$PYCHARM_NAME"
   ( cd "$OUT" && sha256sum "$(basename "$OUT_TGZ")" > SHA256SUMS )
 
-  # ---- verify: on this host ----
-  verify_pycharm_dir "$PYCHARM_DIR" "host ($(uname -sr))"
-  for f in java libjvm.so libjava.so; do
-    p="$(find "$PYCHARM_DIR/jbr" -type f -name "$f" | head -1)"
-    [ -n "$p" ] || continue
-    log "  $(basename "$p"): max GLIBC $(max_glibc "$p") (target <= 2.17)"
-  done
-
-  # ---- verify: end-to-end from the produced tarball ----
-  # (docker validates the tarball too; skip the extra host re-extract to save disk)
-  if ! command -v docker >/dev/null 2>&1; then
-    CHECK_DIR="$WORK/check"
-    mkdir -p "$CHECK_DIR"
-    tar -xzf "$OUT_TGZ" -C "$CHECK_DIR"
-    verify_pycharm_dir "$CHECK_DIR/$PYCHARM_NAME" "produced tarball (fresh extract)"
-  fi
-
-  # ---- optional: docker (centos:7) validation ----
+  # ---- end-to-end validation from the produced archive ----
   if command -v docker >/dev/null 2>&1; then
-    log "docker detected - validating in centos:7 container (glibc 2.17)"
+    log "validating produced archive inside centos:7 (glibc 2.17)"
     docker run --rm -v "$OUT:/dist:ro" centos:7 \
       bash -c "
         set -e
         mkdir -p /tmp/v
         tar xzf /dist/$(basename "$OUT_TGZ") -C /tmp/v
-        /tmp/v/$PYCHARM_NAME/jbr/bin/java -version
-        cd /tmp/v/$PYCHARM_NAME && ./bin/pycharm --version
-        cd /tmp/v/$PYCHARM_NAME && ./bin/pycharm.sh --version
+        cd /tmp/v/$PYCHARM_NAME
+
+        test -f lib/centos7-runtime/libstdc++.so.6
+        test -f lib/centos7-runtime/libgcc_s.so.1
+        grep -q 'pycharmcentos7 private C++ runtime' bin/pycharm.sh
+
+        # Deliberately put CentOS 7's old libstdc++ on the incoming path.
+        # pycharm.sh must still start because it prepends the packaged runtime.
+        env LD_LIBRARY_PATH=/usr/lib64:/lib64 ./bin/pycharm --version
+        env LD_LIBRARY_PATH=/usr/lib64:/lib64 ./bin/pycharm.sh --version
+        ./jbr/bin/java -version
+
+        SKIKO=\$(find . -type f -name 'libskiko-linux-x64.so' -print -quit)
+        if [ -n \"\$SKIKO\" ]; then
+          LD_LIBRARY_PATH=\"\$PWD/lib/centos7-runtime:/usr/lib64:/lib64\" \
+            ldd \"\$SKIKO\" > /tmp/skiko-ldd.txt 2>&1 || true
+          cat /tmp/skiko-ldd.txt
+
+          grep -F \"\$PWD/lib/centos7-runtime/libstdc++.so.6\" /tmp/skiko-ldd.txt
+          if grep -Eq '(GLIBCXX_|CXXABI_)[0-9.]+.*not found' /tmp/skiko-ldd.txt; then
+            echo 'Skiko still has unresolved GLIBCXX/CXXABI symbols' >&2
+            exit 1
+          fi
+        fi
       " || die "validation inside centos:7 container failed"
   else
-    log "docker not present - skipped container validation (host is CentOS 7)"
+    log "docker not present - validating a fresh local extraction"
+    CHECK_DIR="$WORK/check"
+    mkdir -p "$CHECK_DIR"
+    tar -xzf "$OUT_TGZ" -C "$CHECK_DIR"
+    verify_pycharm_dir "$CHECK_DIR/$PYCHARM_NAME" "produced archive (fresh extract)"
+    verify_skiko_runtime "$CHECK_DIR/$PYCHARM_NAME" "produced archive"
   fi
 
   if [ "$KEEP_WORK" -eq 0 ]; then
