@@ -399,6 +399,8 @@ apply_centos7_tweaks() {
 -ea
 -Dsun.io.useCanonCaches=false
 -Dsun.java2d.metal=true
+-Dawt.useSystemAAFontSettings=on
+-Dswing.aatext=true
 -Djbr.catch.SIGABRT=true
 -Djdk.http.auth.tunneling.disabledSchemes=""
 -Djdk.attach.allowAttachSelf=true
