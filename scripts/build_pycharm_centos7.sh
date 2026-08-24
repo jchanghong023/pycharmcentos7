@@ -479,16 +479,22 @@ main() {
 
   JBR_FILE=""
   JBR_HASH=""
-  while read -r _h _f; do
-    _f="${_f#./}"
-    if [[ "$_f" == $JBR_ASSET_PATTERN ]]; then
-      JBR_FILE="$_f"
-      JBR_HASH="$_h"
-      break
-    fi
-  done < "$WORK/SHA256SUMS.jbr"
+  # The JBR release asset naming changed across releases
+  # (e.g. 'jbr-25.0.4-linux-x64-b2.1.tar.gz' vs the legacy 'jbr_lb-...').
+  # Try the configured pattern first, then fall back to known variants.
+  for _pattern in "$JBR_ASSET_PATTERN" "jbr-*-linux-x64-*.tar.gz" "jbr_lb-*-linux-x64-*.tar.gz"; do
+    while read -r _h _f; do
+      _f="${_f#./}"
+      if [[ "$_f" == $_pattern ]]; then
+        JBR_FILE="$_f"
+        JBR_HASH="$_h"
+        break
+      fi
+    done < "$WORK/SHA256SUMS.jbr"
+    [ -n "$JBR_FILE" ] && break
+  done
 
-  [ -n "$JBR_FILE" ] || die "no JBR asset matched '$JBR_ASSET_PATTERN' in release $JBR_RELEASE"
+  [ -n "$JBR_FILE" ] || die "no JBR asset matched '$JBR_ASSET_PATTERN' (or its fallbacks) in release $JBR_RELEASE"
   log "JBR asset: $JBR_FILE"
   download "$JBR_BASE/$JBR_FILE" "$WORK/$JBR_FILE"
   verify_sha256 "$WORK/$JBR_FILE" "$JBR_HASH"
