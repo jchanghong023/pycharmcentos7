@@ -70,7 +70,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: PyCharm ${{ steps.meta.outputs.version }} (CentOS 7) #${{ github.run_number }}
+          name: "PyCharm ${{ steps.meta.outputs.version }} (CentOS 7) #${{ github.run_number }}"
           body: |
             PyCharm **${{ steps.meta.outputs.version }}** packaged to run directly on **CentOS 7 / glibc 2.17**.
 
