@@ -2,6 +2,9 @@
 
 jbr 用 https://github.com/jchanghong023/JetBrainsRuntime 的最新发布版本
 
+
+下面是测试通过的方案，但是需要修改pycharm,pycharm.sh 直接启动就能用， 把最新的 libc 打包。
+
 根因已确认，修复方案验证通过。
 
 诊断结论
